@@ -1,101 +1,80 @@
 import streamlit as st
 import pandas as pd
 import openai
-import os
-import time
+import json
+import re
 
-# Set your OpenAI API key from environment variable
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-st.title("Gut Metabolite AI Agent Data Filler")
+MASTER_PROMPT = """
+For the compound "{compound}", provide the following fields strictly in valid JSON format ONLY (no explanation, no extra text). Use these exact keys:
 
-uploaded_file = st.file_uploader("Upload your CSV file with 'Compound Name' column", type=["csv"])
+"Compound Name", "Metabolite", "Gut Metabolome Database", "Metabolite Database ID", "Chemical Formula", "Monoisotopic Mass", "Class of Metabolites", "Pathway Name", "Sample Type", "Metabolic Functions", "Origin", "Microbial Genus", "Microbial Species", "Microbial Strains", "Roles in Gut Health", "Immune Modulation", "Microbial Interactions", "Microbial Diversity Marker", "Digestive Efficiency Indicator", "Health Risk Biomarker", "Neuroendocrine Modulator", "Metabolic Syndrome Indicator", "Barrier Integrity Marker", "Inflammation Marker", "Anti-inflammatory", "Disease Association", "Influenced by Diet", "Gene Association", "RDA Value", "RDA Reference Unit", "RDA Category", "Reference", "MS Data Source".
 
-MASTER_PROMPT_TEMPLATE = """
-Search across the following gut-related databases: MiMeDB, GMMAD, HMDB, VMH, EnteroPathway, GutMGene, MAGMD, Metabolomics Workbench, KEGG, MetaCyc, METLIN, FooDB, ECMDB, FMDB, and BioCyc. Extract comprehensive data for the compound: "{compound_name}" and structure the output with the following columns:
-• Compound Name
-• Metabolite (Y/N — is it a known gut metabolite?)
-• Gut Metabolome Database (name of database source)
-• Metabolite Database ID (unique database ID)
-• Chemical Formula
-• Monoisotopic Mass
-• Class of Metabolites (e.g., SCFA, bile acid, polyphenol)
-• Pathway Name (biochemical or metabolic pathway)
-• Sample Type (stool, blood, urine, both, or other)
-• Metabolic Functions (brief summary of roles)
-• Origin (Human, Microbial, Dietary)
-• Microbial Genus
-• Microbial Species
-• Microbial Strains
-• Roles in Gut Health (e.g., supports mucosa, combats dysbiosis)
-• Summarize the key immune pathway affected and the resulting immune response.
-• Provide the most significant microbial interaction and its functional consequence in the gut ecosystem.
-• Explain what this marker reveals about gut microbiome diversity in one sentence.
-• Describe how this metabolite reflects digestive or absorption capacity and its clinical significance.
-• Identify the primary disease risk this metabolite indicates and its predictive value.
-• Explain this metabolite's gut-brain axis mechanism and its neurological/hormonal effect.
-• Describe this metabolite's role in metabolic dysfunction and its association with obesity/diabetes.
-• Explain how this metabolite affects intestinal barrier function and gut permeability.
-• Identify whether this metabolite promotes or reduces inflammation and its primary pathway.
-• Describe the specific anti-inflammatory mechanism and its protective health benefit.
-• Disease Association (e.g., IBD, NAFLD, CRC)
-• Influenced by Diet (Y/N with dietary sources or inhibitors)
-• Gene Association (relevant host/microbial genes)
-• RDA Value (e.g., 500 mg/day)
-• RDA Reference Unit (mg/day, μmol/L, etc.)
-• RDA Category (Adult, Infant, Pregnant, Elderly, etc.)
-• Reference (PubMed ID, DOI, or database source link)
-• MS Data Source (Mass spectrometry platform/data ID)
-For all descriptive fields, provide concise scientific answers (1–3 sentences each). Use "NA" if data is not available. Output should be in CSV or JSON format for easy import into a database.
+If any data is not available, use "NA" as value.
 """
 
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    if "Compound Name" not in df.columns:
-        st.error("Your CSV file must contain a column named 'Compound Name'.")
-    else:
-        st.write("Input Data Preview:")
-        st.dataframe(df.head())
+def generate_compound_data(compound):
+    prompt = MASTER_PROMPT.format(compound=compound)
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are an expert gut metabolite database assistant."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0,
+        max_tokens=1200,
+    )
+    content = response['choices'][0]['message']['content']
 
+    # Try parsing JSON
+    try:
+        data_json = json.loads(content)
+    except json.JSONDecodeError:
+        # Try to extract JSON substring if GPT added extra text
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            try:
+                data_json = json.loads(json_match.group(0))
+            except:
+                data_json = {"Compound Name": compound, "Error": "Failed to parse JSON after extraction"}
+        else:
+            data_json = {"Compound Name": compound, "Error": "No JSON found in GPT output"}
+
+    return data_json
+
+def main():
+    st.title("Gut Metabolite AI Agent")
+
+    uploaded_file = st.file_uploader("Upload CSV with 'Compound Name' column", type=["csv"])
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        if 'Compound Name' not in df.columns:
+            st.error("CSV must have 'Compound Name' column")
+            return
+        
         if st.button("Fill Data using AI Agent"):
-            all_responses = []
+            all_data = []
+            progress = st.progress(0)
+            total = len(df)
             for idx, row in df.iterrows():
                 compound = row['Compound Name']
-                prompt = MASTER_PROMPT_TEMPLATE.format(compound_name=compound)
-
-                with st.spinner(f"Processing {compound} ({idx+1}/{len(df)})..."):
-                    try:
-                        response = openai.ChatCompletion.create(
-                            model="gpt-4o-mini",
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.2,
-                            max_tokens=800,
-                        )
-                        content = response['choices'][0]['message']['content']
-                    except Exception as e:
-                        content = f"Error fetching data for {compound}: {str(e)}"
-
-                all_responses.append({
-                    "Compound Name": compound,
-                    "AI Response": content
-                })
-
-                # Optional: avoid rate limits
-                time.sleep(1.5)
-
-            # Show all results in a dataframe
-            result_df = pd.DataFrame(all_responses)
-            st.write("AI Filled Data Preview:")
+                st.write(f"Processing: {compound} ({idx+1}/{total})")
+                data = generate_compound_data(compound)
+                all_data.append(data)
+                progress.progress((idx+1)/total)
+            
+            result_df = pd.DataFrame(all_data)
+            st.success("Data filled successfully!")
             st.dataframe(result_df)
 
-            # Allow download of results as CSV
             csv = result_df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="Download filled data as CSV",
+                label="Download filled CSV",
                 data=csv,
-                file_name='filled_gut_metabolite_data.csv',
+                file_name='gut_metabolites_filled.csv',
                 mime='text/csv',
             )
-else:
-    st.info("Upload a CSV file containing a 'Compound Name' column to start.")
 
+if __name__ == "__main__":
+    main()
