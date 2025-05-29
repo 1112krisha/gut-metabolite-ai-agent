@@ -1,80 +1,81 @@
-import streamlit as st
-import pandas as pd
 import openai
-import json
-import re
+import pandas as pd
+import streamlit as st
+import time
 
+# Set your OpenAI API key securely
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-MASTER_PROMPT = """
-For the compound "{compound}", provide the following fields strictly in valid JSON format ONLY (no explanation, no extra text). Use these exact keys:
+# --- Streamlit GUI ---
+st.title("🧠 Gut Metabolite AI Agent")
+st.write("Upload a CSV file with a column named **'Compound Name'** to fetch gut metabolite data.")
 
-"Compound Name", "Metabolite", "Gut Metabolome Database", "Metabolite Database ID", "Chemical Formula", "Monoisotopic Mass", "Class of Metabolites", "Pathway Name", "Sample Type", "Metabolic Functions", "Origin", "Microbial Genus", "Microbial Species", "Microbial Strains", "Roles in Gut Health", "Immune Modulation", "Microbial Interactions", "Microbial Diversity Marker", "Digestive Efficiency Indicator", "Health Risk Biomarker", "Neuroendocrine Modulator", "Metabolic Syndrome Indicator", "Barrier Integrity Marker", "Inflammation Marker", "Anti-inflammatory", "Disease Association", "Influenced by Diet", "Gene Association", "RDA Value", "RDA Reference Unit", "RDA Category", "Reference", "MS Data Source".
+uploaded_file = st.file_uploader("📁 Upload CSV", type=["csv"])
+if uploaded_file:
+    input_df = pd.read_csv(uploaded_file)
+    st.success("✅ File uploaded!")
 
-If any data is not available, use "NA" as value.
-"""
+    if st.button("🚀 Fill Data"):
+        with st.spinner("Fetching data using AI..."):
 
-def generate_compound_data(compound):
-    prompt = MASTER_PROMPT.format(compound=compound)
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "You are an expert gut metabolite database assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0,
-        max_tokens=1200,
-    )
-    content = response['choices'][0]['message']['content']
+            # Define master fields for output
+            output_columns = [
+                "Compound Name", "Metabolite (Y/N)", "Gut Metabolome Database", "Metabolite Database ID",
+                "Chemical Formula", "Monoisotopic Mass", "Class of Metabolites", "Pathway Name", "Sample Type",
+                "Metabolic Functions", "Origin", "Microbial Genus", "Microbial Species", "Microbial Strains",
+                "Roles in Gut Health", "Immune Pathway Summary", "Key Microbial Interaction",
+                "Microbiome Diversity Insight", "Digestive/Absorption Insight", "Primary Disease Risk",
+                "Gut-Brain Axis Role", "Role in Metabolic Dysfunction", "Effect on Gut Barrier",
+                "Inflammation Role", "Anti-inflammatory Mechanism", "Disease Association",
+                "Influenced by Diet", "Gene Association", "RDA Value", "RDA Reference Unit",
+                "RDA Category", "Reference", "MS Data Source"
+            ]
 
-    # Try parsing JSON
-    try:
-        data_json = json.loads(content)
-    except json.JSONDecodeError:
-        # Try to extract JSON substring if GPT added extra text
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            try:
-                data_json = json.loads(json_match.group(0))
-            except:
-                data_json = {"Compound Name": compound, "Error": "Failed to parse JSON after extraction"}
-        else:
-            data_json = {"Compound Name": compound, "Error": "No JSON found in GPT output"}
+            result_data = []
 
-    return data_json
+            for index, row in input_df.iterrows():
+                compound = row["Compound Name"]
 
-def main():
-    st.title("Gut Metabolite AI Agent")
+                # Compose smart prompt
+                prompt = f"""
+Search any of these databases: MiMeDB, GMMAD, HMDB, VMH, EnteroPathway, GutMGene, MAGMD, Metabolomics Workbench, KEGG, MetaCyc, METLIN, FooDB, ECMDB, FMDB, BioCyc.
 
-    uploaded_file = st.file_uploader("Upload CSV with 'Compound Name' column", type=["csv"])
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file)
-        if 'Compound Name' not in df.columns:
-            st.error("CSV must have 'Compound Name' column")
-            return
-        
-        if st.button("Fill Data using AI Agent"):
-            all_data = []
-            progress = st.progress(0)
-            total = len(df)
-            for idx, row in df.iterrows():
-                compound = row['Compound Name']
-                st.write(f"Processing: {compound} ({idx+1}/{total})")
-                data = generate_compound_data(compound)
-                all_data.append(data)
-                progress.progress((idx+1)/total)
-            
-            result_df = pd.DataFrame(all_data)
-            st.success("Data filled successfully!")
-            st.dataframe(result_df)
+Extract data for: **{compound}** (gut metabolite). Only use what is available in any database — NA if not found.
 
-            csv = result_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Download filled CSV",
-                data=csv,
-                file_name='gut_metabolites_filled.csv',
-                mime='text/csv',
-            )
+Return in CSV row format (no explanation), with the following columns:
+{', '.join(output_columns)}
 
-if __name__ == "__main__":
-    main()
+Each field must be based on available info from one or more sources — you are not required to use all databases.
+                """
+
+                try:
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                    )
+                    content = response["choices"][0]["message"]["content"]
+
+                    # Try splitting into CSV row
+                    values = content.strip().split(",")
+                    if len(values) == len(output_columns):
+                        result_data.append(values)
+                    else:
+                        st.warning(f"⚠️ Skipped {compound} — response did not match expected columns.")
+                        result_data.append([compound] + ["NA"] * (len(output_columns) - 1))
+                    time.sleep(2)  # avoid rate limits
+
+                except Exception as e:
+                    st.error(f"❌ Error processing {compound}: {str(e)}")
+                    result_data.append([compound] + ["NA"] * (len(output_columns) - 1))
+
+            # Create output DataFrame and show
+            output_df = pd.DataFrame(result_data, columns=output_columns)
+            st.success("✅ All compounds processed!")
+
+            # Display and download
+            st.dataframe(output_df)
+            st.download_button("📥 Download Filled CSV", output_df.to_csv(index=False), "filled_data.csv", "text/csv")
+
+else:
+    st.info("⬆️ Please upload a CSV file first.")
